@@ -6,3 +6,9 @@
 !*.md
 !Makefile
 !*.py
+
+.DS_Store
+._*
+/labyrinth/labyrinth
+/labyrinth/test.map
+/m1-tests.txt
