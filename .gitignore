@@ -12,3 +12,5 @@
 /labyrinth/labyrinth
 /labyrinth/test.map
 /m1-tests.txt
+
+!/.github/workflows/*.yml

@@ -1,0 +1,29 @@
+name: NJU OS 2026 M1
+on:
+  push:
+    branches: [edidada/M1]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run original public TestKit
+        run: |
+          set -o pipefail
+          gcc -O2 -std=gnu2x -g -Wall -Wextra -Werror -Itestkit labyrinth/labyrinth.c labyrinth/tests.c testkit/testkit.c -o labyrinth/labyrinth
+          cd labyrinth
+          TK_RUN=1 TK_VERBOSE=1 ./labyrinth --version | tee ../m1-tests.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          scores=re.findall(r'(\d+)/(\d+) test cases passed',Path('../m1-tests.txt').read_text())
+          assert scores and all(a==b for a,b in scores),scores
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m1-testkit-results
+          path: m1-tests.txt
