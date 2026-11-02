@@ -14,3 +14,5 @@
 /m1-tests.txt
 
 !/.github/workflows/*.yml
+
+/labyrinth/tests_compat.c
