@@ -19,6 +19,7 @@ if not cache.exists():
     with urllib.request.urlopen(url,timeout=120) as response,cache.open('wb') as out:
         while chunk:=response.read(1024*1024):out.write(chunk)
 assert cache.stat().st_size==64*1024*1024,cache.stat().st_size
+assert hashlib.file_digest(cache.open('rb'),'sha256').hexdigest()=='4ff3dc690a55ee964ed31a693902b59b8d2da129779ea16704038a8dd05cb7bd'
 (root/'official-source.json').write_text(json.dumps({'url':'https://box.nju.edu.cn/f/66a41ec46a334e8d8203/','size':cache.stat().st_size,'sha256':hashlib.file_digest(cache.open('rb'),'sha256').hexdigest()},indent=2)+'\n')
 
 def command(args):

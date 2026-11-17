@@ -90,7 +90,7 @@ static unsigned char short_checksum(const unsigned char *entry) {
     return checksum;
 }
 
-static int long_name(const Disk *disk, size_t offset, char name[256]) {
+static int long_name(const Disk *disk, size_t offset, const unsigned char *directories, char name[256]) {
     static const unsigned char positions[] = {1,3,5,7,9,14,16,18,20,22,24,28,30};
     const unsigned char *entry = disk->bytes + offset;
     unsigned char checksum = short_checksum(entry);
@@ -99,11 +99,28 @@ static int long_name(const Disk *disk, size_t offset, char name[256]) {
     int complete = 0;
     size_t units = 0;
     for (unsigned int order = 1; order <= 20; order++) {
-        if (offset < disk->data + 32) break;
-        offset -= 32;
-        const unsigned char *part = disk->bytes + offset;
-        if (part[0] != order && part[0] != (order | 0x40)) break;
-        if (part[11] != 0x0f || part[12] || part[13] != checksum || le16(part + 26)) break;
+        int boundary = (offset - disk->data) % disk->cluster_size == 0;
+        const unsigned char *part = offset >= disk->data + 32 ? disk->bytes + offset - 32 : NULL;
+        int valid = part && (part[0] == order || part[0] == (order | 0x40)) &&
+                    part[11] == 0x0f && !part[12] && part[13] == checksum && !le16(part + 26);
+        if (!valid && boundary) {
+            // A directory's next cluster need not be physically adjacent.
+            // A matching ordinal/checksum at a recognized directory tail is
+            // usable only when unique; ambiguous fragments are not guessed.
+            part = NULL;
+            for (uint32_t c = 0; c < disk->clusters; c++) {
+                if (!directories[c]) continue;
+                const unsigned char *candidate = cluster_bytes(disk, c + 2) + disk->cluster_size - 32;
+                if ((candidate[0] == order || candidate[0] == (order | 0x40)) &&
+                    candidate[11] == 0x0f && !candidate[12] && candidate[13] == checksum && !le16(candidate + 26)) {
+                    if (part) return 0;
+                    part = candidate;
+                }
+            }
+            valid = part != NULL;
+        }
+        if (!valid) break;
+        offset = (size_t)(part - disk->bytes);
         for (size_t i = 0; i < 13; i++) characters[(order - 1) * 13 + i] = le16(part + positions[i]);
         if (part[0] & 0x40) { complete = 1; units = order * 13; break; }
     }
@@ -190,7 +207,7 @@ static int checksum_file(int fd, char digest[41]) {
     return 0;
 }
 
-static int recover_image(const Disk *disk, const Image *image, uint32_t *chain, uint32_t *visited, uint32_t stamp) {
+static int recover_image(const Disk *disk, const Image *image, const uint32_t *owners, uint32_t *chain, uint32_t *visited, uint32_t stamp) {
     size_t count = ((size_t)image->size + disk->cluster_size - 1) / disk->cluster_size;
     if (!count || count > disk->clusters) return 0;
     uint32_t cluster = image->first;
@@ -205,8 +222,17 @@ static int recover_image(const Disk *disk, const Image *image, uint32_t *chain, 
         } else cluster = next;
     }
     if (!fat_chain) {
-        if ((uint64_t)image->first + count > (uint64_t)disk->clusters + 2) return 0;
-        for (size_t i = 0; i < count; i++) chain[i] = image->first + (uint32_t)i;
+        size_t found = 0;
+        cluster = image->first;
+        // FAT allocation normally scans forward and can wrap at the end of
+        // the volume. Skip conservative prefixes of other known BMP files
+        // and directory clusters instead of copying them into this image.
+        for (uint32_t seen = 0; seen < disk->clusters && found < count; seen++) {
+            uint32_t owner = owners[cluster - 2];
+            if (!owner || owner == stamp) chain[found++] = cluster;
+            cluster = cluster == disk->clusters + 1 ? 2 : cluster + 1;
+        }
+        if (found != count) return 0;
     }
     char name[] = "/tmp/fsrecov-XXXXXX";
     int output = mkostemp(name, O_CLOEXEC);
@@ -234,17 +260,30 @@ int main(int argc, char **argv) {
     if (map_disk(argv[1], &disk)) return 1;
     uint32_t *chain = malloc((size_t)disk.clusters * sizeof(*chain));
     uint32_t *visited = calloc(disk.clusters, sizeof(*visited));
+    uint32_t *owners = calloc(disk.clusters, sizeof(*owners));
+    uint32_t *starts = calloc(disk.clusters, sizeof(*starts));
+    unsigned char *directories = calloc(disk.clusters, 1);
     Image *images = NULL;
     size_t length = 0, capacity = 0, fat_count = 0, contiguous_count = 0;
     int result = 0;
-    if (!chain || !visited) { result = 1; goto done; }
+    if (!chain || !visited || !owners || !starts || !directories) { result = 1; goto done; }
+    uint32_t root = le32(disk.bytes + 44) & 0x0fffffff;
+    if (cluster_valid(&disk, root)) directories[root - 2] = 1;
+    // Classify directory clusters before resolving any long-name boundary.
+    for (size_t offset = disk.data; offset + 32 <= disk.volume; offset += 32) {
+        const unsigned char *entry = disk.bytes + offset;
+        if (!entry[0] || entry[0] == 0xe5 || (entry[11] & 0xd8) ||
+            strncasecmp((const char *)entry + 8, "BMP", 3)) continue;
+        uint32_t first = ((uint32_t)le16(entry + 20) << 16) | le16(entry + 26);
+        if (bitmap_header(&disk, first, le32(entry + 28))) directories[(offset - disk.data) / disk.cluster_size] = 1;
+    }
     for (size_t offset = disk.data; offset + 32 <= disk.volume; offset += 32) {
         const unsigned char *entry = disk.bytes + offset;
         if (!entry[0] || entry[0] == 0xe5 || (entry[11] & 0xd8) ||
             (entry[11] & 0x0f) == 0x0f || strncasecmp((const char *)entry + 8, "BMP", 3)) continue;
         Image image = {.first = ((uint32_t)le16(entry + 20) << 16) | le16(entry + 26), .size = le32(entry + 28)};
         if (!bitmap_header(&disk, image.first, image.size)) continue;
-        if (!long_name(&disk, offset, image.name) && !short_name(entry, image.name)) continue;
+        if (!long_name(&disk, offset, directories, image.name) && !short_name(entry, image.name)) continue;
         size_t i;
         for (i = 0; i < length; i++) if (!strcmp(images[i].name, image.name) && images[i].first == image.first && images[i].size == image.size) break;
         if (i != length) continue;
@@ -257,14 +296,29 @@ int main(int argc, char **argv) {
         }
         images[length++] = image;
         if (length > UINT32_MAX) { result = 1; break; }
-        int recovered = recover_image(&disk, &image, chain, visited, (uint32_t)length);
+    }
+    for (size_t i = 0; i < length; i++) starts[images[i].first - 2] = (uint32_t)i + 1;
+    for (uint32_t c = 0; c < disk.clusters; c++) if (directories[c]) owners[c] = UINT32_MAX;
+    for (size_t i = 0; i < length; i++) {
+        uint32_t c = images[i].first, owner = (uint32_t)i + 1;
+        size_t count = ((size_t)images[i].size + disk.cluster_size - 1) / disk.cluster_size;
+        for (size_t j = 0; j < count; j++) {
+            uint32_t at = c - 2;
+            if (directories[at] || (starts[at] && starts[at] != owner) ||
+                (owners[at] && owners[at] != owner)) break;
+            owners[at] = owner;
+            c = c == disk.clusters + 1 ? 2 : c + 1;
+        }
+    }
+    for (size_t i = 0; i < length && !result; i++) {
+        int recovered = recover_image(&disk, &images[i], owners, chain, visited, (uint32_t)i + 1);
         if (recovered < 0) { perror("Recover/checksum"); result = 1; break; }
         fat_count += recovered == 2;
         contiguous_count += recovered == 1;
     }
-    fprintf(stderr, "Candidates=%zu FAT=%zu contiguous=%zu\n", length, fat_count, contiguous_count);
+    fprintf(stderr, "Candidates=%zu FAT=%zu inferred=%zu\n", length, fat_count, contiguous_count);
 done:
-    free(chain); free(visited); free(images);
+    free(chain); free(visited); free(owners); free(starts); free(directories); free(images);
     munmap((void *)disk.bytes, disk.mapped);
     return result;
 }
