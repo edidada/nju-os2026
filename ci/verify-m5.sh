@@ -38,3 +38,18 @@ for config in '1 16 1 10000' '8 16 1 10000' '1 64 256 200' '8 64 256 200' '1 204
   ./evidence/benchmark "$threads" "$bytes" "$batch" "$iterations" > "evidence/benchmark-$threads-$bytes-$batch-$repeat.csv"
  done
 done
+
+# Fixed source baseline, compiled and measured beside current code on this runner.
+git show c75b7c9caea04bd0f51782b16f04d48842cd0695:mymalloc/mymalloc.c > evidence/baseline.c
+printf '\nvoid mymalloc_trim(void) {}\n' >> evidence/baseline.c
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc evidence/baseline.c ci/benchmark.c -pthread -o evidence/benchmark-baseline
+for repeat in 1 2 3; do
+ for config in '1 16 1 10000' '8 16 1 10000' '8 64 256 200'; do
+  read -r threads bytes batch iterations <<< "$config"
+  for version in baseline current; do
+   executable=evidence/benchmark
+   if [ "$version" = baseline ]; then executable=evidence/benchmark-baseline; fi
+   "$executable" "$threads" "$bytes" "$batch" "$iterations" > "evidence/paired-$version-$threads-$bytes-$batch-$repeat.csv"
+  done
+ done
+done
