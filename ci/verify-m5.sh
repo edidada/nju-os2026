@@ -62,3 +62,17 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc mymalloc/mymalloc.c ci/pressur
 timeout 30 ./evidence/pressure > evidence/pressure.result
 gcc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -Imymalloc mymalloc/mymalloc.c ci/pressure.c -pthread -o evidence/pressure-sanitized
 timeout 30 ./evidence/pressure-sanitized > evidence/pressure-sanitized.result
+
+# Prove this regression rejects the exact pre-fix implementation.
+git show 63d42e8e50cc9fba8b29b149e787f2eff212d1d5:mymalloc/mymalloc.c > evidence/pressure-baseline.c
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc evidence/pressure-baseline.c ci/pressure.c -pthread -o evidence/pressure-baseline
+python3 - <<'PYTEST'
+from pathlib import Path
+import subprocess,signal,resource
+resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+p=subprocess.run(['evidence/pressure-baseline'],capture_output=True,text=True,timeout=30)
+Path('evidence/pressure-baseline.stderr').write_text(p.stderr)
+assert p.returncode==-signal.SIGABRT,(p.returncode,p.stdout,p.stderr)
+assert 'recovered==holes' in p.stderr,p.stderr
+Path('evidence/pressure-baseline.result').write_text('PASS: exact pre-fix allocator rejected at recovered==holes with new mappings denied.\n')
+PYTEST

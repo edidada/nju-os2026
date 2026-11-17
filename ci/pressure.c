@@ -17,13 +17,14 @@ void *vmalloc(void *hint,size_t n) {
 }
 void vmfree(void *p,size_t n){assert(!munmap(p,n));atomic_fetch_sub(&mapped,n);}
 static unsigned producer;
-static int ran,scenario;
-static size_t recovered;
+static atomic_int ran;
+static int scenario;
+static atomic_size_t recovered;
 static void *objects[128];
 static void *consumer(void *unused) {
     (void)unused;
     if((unsigned)syscall(SYS_gettid)%32==producer)return NULL;
-    ran=1;
+    atomic_fetch_add(&ran,1);
     if(!scenario) {
         while(recovered<128) {
             void *p=mymalloc(1024);if(!p)break;
@@ -39,10 +40,11 @@ static void *consumer(void *unused) {
 static void run_consumer(void) {
     ran=0;recovered=0;atomic_store(&deny_mapping,1);
     for(unsigned attempt=0;!ran && attempt<64;++attempt) {
-        pthread_t thread;assert(!pthread_create(&thread,NULL,consumer,NULL));
-        assert(!pthread_join(thread,NULL));
+        pthread_t threads[8];unsigned count=scenario?1:8;
+        for(unsigned i=0;i<count;++i)assert(!pthread_create(&threads[i],NULL,consumer,NULL));
+        for(unsigned i=0;i<count;++i)assert(!pthread_join(threads[i],NULL));
     }
-    assert(ran);atomic_store(&deny_mapping,0);
+    assert(ran);if(!scenario)assert(ran>=2);atomic_store(&deny_mapping,0);
 }
 int main(void) {
     producer=(unsigned)syscall(SYS_gettid)%32;
