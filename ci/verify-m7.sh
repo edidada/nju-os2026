@@ -7,7 +7,7 @@ gcc -std=gnu11 -O2 -g -Wall -Wextra -Werror httpd/httpd.c -pthread -o evidence/h
 gcc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer httpd/httpd.c -pthread -o evidence/httpd-sanitized
 python3 - <<'PY'
 from pathlib import Path
-import os,socket,subprocess,tempfile,shutil,time,threading,re,json,concurrent.futures,struct
+import os,socket,subprocess,tempfile,shutil,time,threading,re,json,concurrent.futures,select
 evidence=Path('evidence').resolve()
 assert not re.search(r'\b(?:SystemTest|UnitTest)\s*\(',Path('httpd/tests.c').read_text()),'revisit official coverage'
 
@@ -179,9 +179,34 @@ printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n%s' "$QUERY_STRING"''
     errors=(evidence/f'{binary}.stderr').read_text()
     assert 'AddressSanitizer' not in errors and 'runtime error:' not in errors,errors
     all_results.append(results)
+# Exercise the documented no-argument port independently of custom-port runs.
+with tempfile.TemporaryDirectory(prefix='m7-default-') as directory:
+    root=Path(directory);(root/'cgi-bin').mkdir()
+    shutil.copy2('httpd/cgi-bin/echo',root/'cgi-bin/echo')
+    server=subprocess.Popen([str(evidence/'httpd')],cwd=root,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    output=[]
+    try:
+        assert select.select([server.stdout],[],[],5)[0],'default startup did not flush'
+        output.append(server.stdout.readline())
+        assert 'port 8080' in output[-1],output
+        status,body,_=exchange(8080,'/cgi-bin/echo?default=8080')
+        assert status==200 and b'default=8080' in body
+        assert select.select([server.stdout],[],[],5)[0],'default request log did not flush'
+        output.append(server.stdout.readline())
+        assert '[GET] [/cgi-bin/echo] [200]' in output[-1],output
+    finally:
+        server.terminate()
+        rest,errors=server.communicate(timeout=5)
+        output.append(rest)
+        (evidence/'default-port.stdout').write_text(''.join(output))
+        (evidence/'default-port.stderr').write_text(errors)
+    assert not errors,errors
+    (evidence/'default-port.json').write_text(json.dumps({'port':8080,'argv':[],'response_status':status,'log_flushed':True})+'\n')
 for port in ['0','65536','not-a-port']:
     q=subprocess.run([str(evidence/'httpd'),port],capture_output=True,text=True,timeout=3)
     assert q.returncode==2,(port,q.returncode)
+q=subprocess.run([str(evidence/'httpd'),'8080','extra'],capture_output=True,text=True,timeout=3)
+assert q.returncode==2
 (evidence/'results.json').write_text(json.dumps(all_results,indent=2)+'\n')
-(evidence/'checks.result').write_text('PASS: normal and ASan/UBSan real CGI; full/header-only responses and statuses; invalid paths and child failures; fragmented headers/2MiB binary; four active plus fifth accepted/queued; fast completion with ordered flushed logs; 48 concurrent isolated environments each; descriptors restored and no child zombies; invalid ports rejected; original tests empty\n')
+(evidence/'checks.result').write_text('PASS: normal and ASan/UBSan real CGI; full/header-only responses and statuses; invalid paths and child failures; fragmented headers/2MiB binary; four active plus fifth accepted/queued; fast completion with ordered flushed logs; 48 concurrent isolated environments each; descriptors restored and no child zombies; default 8080 real request; invalid ports and excess args rejected; original tests empty\n')
 PY
