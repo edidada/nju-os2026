@@ -2,6 +2,7 @@
 // https://github.com/karpathy/llm.c
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -83,27 +84,121 @@ void layernorm_forward(float* out, float* mean, float* rstd,
     }
 }
 
+// A persistent team shares independent output elements. Each dot product keeps
+// the serial accumulation order, so no cross-thread floating point reduction
+// or change to the model's sampling semantics is needed.
+#ifndef GPT_WORKERS
+#define GPT_WORKERS 4
+#endif
+_Static_assert(GPT_WORKERS >= 1 && GPT_WORKERS <= 4, "one to four workers");
+
+typedef struct {
+    float *out, *inp, *weight, *bias;
+    int C, OC;
+    size_t elements;
+} MatmulTask;
+
+static pthread_once_t team_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t dispatch_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t team_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t team_work = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t team_done = PTHREAD_COND_INITIALIZER;
+static pthread_t team_threads[GPT_WORKERS];
+static unsigned long team_epoch;
+static int team_pending, team_stop;
+static MatmulTask team_task;
+
+static void matmul_slice(const MatmulTask *task, int worker) {
+    size_t begin = task->elements * (size_t)worker / GPT_WORKERS;
+    size_t end = task->elements * (size_t)(worker + 1) / GPT_WORKERS;
+    for (size_t q = begin; q < end; q++) {
+        size_t row = q / (size_t)task->OC;
+        size_t o = q % (size_t)task->OC;
+        float *input = task->inp + row * (size_t)task->C;
+        float *weight = task->weight + o * (size_t)task->C;
+        float val = task->bias ? task->bias[o] : 0.0f;
+        for (int i = 0; i < task->C; i++) {
+            val += input[i] * weight[i];
+        }
+        task->out[q] = val;
+    }
+}
+
+static void *matmul_worker(void *argument) {
+    int worker = (int)(intptr_t)argument;
+    unsigned long seen = 0;
+    pthread_mutex_lock(&team_lock);
+    for (;;) {
+        while (!team_stop && team_epoch == seen) {
+            pthread_cond_wait(&team_work, &team_lock);
+        }
+        if (team_stop) break;
+        seen = team_epoch;
+        MatmulTask task = team_task;
+        pthread_mutex_unlock(&team_lock);
+        matmul_slice(&task, worker);
+        pthread_mutex_lock(&team_lock);
+        if (--team_pending == 0) pthread_cond_signal(&team_done);
+    }
+    pthread_mutex_unlock(&team_lock);
+    return NULL;
+}
+
+static void matmul_shutdown(void) {
+    pthread_mutex_lock(&team_lock);
+    team_stop = 1;
+    pthread_cond_broadcast(&team_work);
+    pthread_mutex_unlock(&team_lock);
+    for (int i = 1; i < GPT_WORKERS; i++) {
+        pthread_join(team_threads[i], NULL);
+    }
+}
+
+static void matmul_startup(void) {
+    for (int i = 1; i < GPT_WORKERS; i++) {
+        int error = pthread_create(&team_threads[i], NULL, matmul_worker,
+                                   (void *)(intptr_t)i);
+        if (error) {
+            fprintf(stderr, "Cannot create inference worker: %s\n", strerror(error));
+            abort();
+        }
+    }
+    if (atexit(matmul_shutdown)) abort();
+}
+
 void matmul_forward(float* out,
                     float* inp, float* weight, float* bias,
                     int B, int T, int C, int OC) {
-    // most of the running time is spent here and in matmul_backward
-    // OC is short for "output channels"
-    // inp is (B,T,C), weight is (OC, C), bias is (OC)
-    // out will be (B,T,OC)
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            float* out_bt = out + b * T * OC + t * OC;
-            float* inp_bt = inp + b * T * C + t * C;
+    MatmulTask task = {out, inp, weight, bias, C, OC,
+                      (size_t)B * (size_t)T * (size_t)OC};
+    if (GPT_WORKERS == 1 || task.elements * (size_t)C < 65536) {
+        // Tiny operations avoid thread wakeups; this is the original loop.
+        for (size_t row = 0; row < (size_t)B * (size_t)T; row++) {
             for (int o = 0; o < OC; o++) {
-                float val = (bias != NULL) ? bias[o] : 0.0f;
-                float* wrow = weight + o*C;
+                float val = bias ? bias[o] : 0.0f;
                 for (int i = 0; i < C; i++) {
-                    val += inp_bt[i] * wrow[i];
+                    val += inp[row * (size_t)C + i] * weight[(size_t)o * C + i];
                 }
-                out_bt[o] = val;
+                out[row * (size_t)OC + o] = val;
             }
         }
+        return;
     }
+    pthread_once(&team_once, matmul_startup);
+    // Serialize callers as well as publishing each job. Workers copy its
+    // descriptor under team_lock and signal completion before it is replaced.
+    pthread_mutex_lock(&dispatch_lock);
+    pthread_mutex_lock(&team_lock);
+    team_task = task;
+    team_pending = GPT_WORKERS - 1;
+    team_epoch++;
+    pthread_cond_broadcast(&team_work);
+    pthread_mutex_unlock(&team_lock);
+    matmul_slice(&task, 0);
+    pthread_mutex_lock(&team_lock);
+    while (team_pending) pthread_cond_wait(&team_done, &team_lock);
+    pthread_mutex_unlock(&team_lock);
+    pthread_mutex_unlock(&dispatch_lock);
 }
 
 void attention_forward(float* out, float* preatt, float* att,
