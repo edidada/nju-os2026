@@ -1,0 +1,18 @@
+name: M9 crash-consistent single-file KV database
+on:
+  push:
+    branches: [edidada/M9]
+  workflow_dispatch:
+jobs:
+  kvdb:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify API, concurrency and persistence
+        run: bash ci/verify-m9.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m9-evidence
+          path: evidence/

@@ -1,7 +1,7 @@
 NAME := $(shell basename $(PWD))
 export MODULE := M9
 
-CFLAGS += -I.
+CFLAGS += -I. -pthread
 LIB_SRCS := $(shell find . -maxdepth 1 -name "*.c")
 TEST_SRCS := $(shell find tests/ -maxdepth 1 -name "*.c") ../testkit/testkit.c
 
