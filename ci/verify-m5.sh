@@ -57,3 +57,8 @@ done
 gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc -DFREESTANDING -ffreestanding -fno-builtin -fno-stack-protector -static -nostdlib -nostartfiles -no-pie mymalloc/mymalloc.c ci/freestanding.c -o evidence/freestanding-runtime
 timeout 30 ./evidence/freestanding-runtime
 printf 'PASS: freestanding 512KiB pool, four sizes exhausted twice, contents preserved, identical capacity recovered, bitmap empty\n' > evidence/freestanding-runtime.result
+
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc mymalloc/mymalloc.c ci/pressure.c -pthread -o evidence/pressure
+timeout 30 ./evidence/pressure > evidence/pressure.result
+gcc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -Imymalloc mymalloc/mymalloc.c ci/pressure.c -pthread -o evidence/pressure-sanitized
+timeout 30 ./evidence/pressure-sanitized > evidence/pressure-sanitized.result

@@ -20,7 +20,19 @@ static void *take_page(unsigned owner) {
     spin_lock(&r->lock);
     void *page = r->page; r->page = 0;
     spin_unlock(&r->lock);
-    return page ? page : vmalloc(0, PAGE);
+    if (page) return page;
+    page = vmalloc(0, PAGE);
+    if (page) return page;
+    /* Slow path under memory pressure: idle pages may belong to a thread
+     * that has exited. Transfer exclusive ownership before reinitializing. */
+    for (unsigned i = 1; i < SHARDS; ++i) {
+        r = &reserves[(owner + i) % SHARDS];
+        spin_lock(&r->lock);
+        page = r->page; r->page = 0;
+        spin_unlock(&r->lock);
+        if (page) return page;
+    }
+    return 0;
 }
 static void return_page(unsigned owner, void *page) {
     struct reserve *r = &reserves[owner];
@@ -65,6 +77,12 @@ static void detach(struct bucket *b, struct page *p) {
     if (p->next) p->next->previous = p->previous;
     p->next = p->previous = 0;
 }
+static void *allocate_slot(struct bucket *b, struct page *p) {
+    void *result = p->free;
+    p->free = *(void **)result; ++p->used;
+    if (!p->free) detach(b, p);
+    return result;
+}
 void *mymalloc(size_t size) {
 #ifdef M5_TEST_COUNT
     __atomic_fetch_add(&malloc_count, 1, __ATOMIC_RELAXED);
@@ -87,7 +105,19 @@ void *mymalloc(size_t size) {
         /* Mapping and initialization do not hold a shared allocation lock. */
         spin_unlock(&b->lock);
         p = take_page(owner);
-        if (!p) return 0;
+        if (!p) {
+            /* Retain page ownership: remote free and allocation synchronize
+             * on the original bucket. Never hold two bucket locks. */
+            for (unsigned i = 0; i < SHARDS; ++i) {
+                struct bucket *other = &buckets[(owner + i) % SHARDS][c];
+                spin_lock(&other->lock);
+                struct page *available = other->available;
+                void *result = available ? allocate_slot(other, available) : 0;
+                spin_unlock(&other->lock);
+                if (result) return result;
+            }
+            return 0;
+        }
         p->length = PAGE; p->owner = owner; p->class_id = c; p->used = 0;
         p->capacity = (unsigned)((PAGE - HEADER) / slot);
         p->free = 0;
@@ -98,9 +128,7 @@ void *mymalloc(size_t size) {
         spin_lock(&b->lock);
         insert(b, p);
     }
-    void *result = p->free;
-    p->free = *(void **)result; ++p->used;
-    if (!p->free) detach(b, p);
+    void *result = allocate_slot(b, p);
     spin_unlock(&b->lock);
     return result;
 }
