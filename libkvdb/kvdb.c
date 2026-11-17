@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#define _FILE_OFFSET_BITS 64
 #include <kvdb.h>
 #include <sys/file.h>
 #include <sys/stat.h>
