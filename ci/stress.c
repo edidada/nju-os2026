@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdbool.h>
 static atomic_size_t mapped, peak;
 static atomic_int fail_next;
 void *vmalloc(void *hint,size_t n) {
@@ -74,5 +75,39 @@ int main(void) {
     for(int i=0;i<8;++i)assert(!pthread_join(threads[i],NULL));
     assert(atomic_load(&mapped)<=32*4096);
     mymalloc_trim();assert(!atomic_load(&mapped));pthread_barrier_destroy(&barrier);
+    size_t requested=0;
+    void **mixed=calloc(32768,sizeof *mixed);assert(mixed);
+    for(unsigned i=0;i<32768;++i) {
+        size_t n=1+(i*193u%4096u);requested+=n;
+        mixed[i]=mymalloc(n);assert(mixed[i]);memset(mixed[i],(int)(i%251),n);
+    }
+    size_t dense=atomic_load(&mapped);assert(dense<=4*requested+32*4096);
+    for(unsigned i=0;i<32768;++i) {
+        size_t n=1+(i*193u%4096u);unsigned char *p=mixed[i];
+        for(size_t j=0;j<n;++j)assert(p[j]==i%251);
+        myfree(p);
+    }
+    mymalloc_trim();assert(!atomic_load(&mapped));
+    for(unsigned i=0;i<32768;++i){mixed[i]=mymalloc(8);assert(mixed[i]);}
+    uintptr_t pages[128];void *survivors[128];size_t kept=0;
+    for(unsigned i=0;i<32768;++i) {
+        uintptr_t page=(uintptr_t)mixed[i]&~(uintptr_t)4095;
+        size_t j=0;while(j<kept && pages[j]!=page)++j;
+        if(j==kept){assert(kept<128);pages[kept]=page;survivors[kept++]=mixed[i];}
+        else myfree(mixed[i]);
+    }
+    size_t sparse=atomic_load(&mapped);
+    /* Refill existing pages: sparse occupancy must not become dead capacity. */
+    size_t refill=0;
+    for(unsigned i=0;i<32768;++i) {
+        bool is_survivor=false;
+        for(size_t j=0;j<kept;++j)if(mixed[i]==survivors[j])is_survivor=true;
+        if(!is_survivor){mixed[refill]=mymalloc(8);assert(mixed[refill]);++refill;}
+    }
+    assert(atomic_load(&mapped)<=sparse+4096);
+    for(size_t i=0;i<refill;++i)myfree(mixed[i]);
+    for(size_t i=0;i<kept;++i)myfree(survivors[i]);
+    free(mixed);mymalloc_trim();assert(!atomic_load(&mapped));
+    printf("FRAGMENTATION dense_requested=%zu dense_mapped=%zu sparse_requested=%zu sparse_mapped=%zu refill=%zu\n",requested,dense,kept*8,sparse,refill);
     printf("PASS sizes=8193 small=10000 cross_thread_allocations=81920 peak=%zu final=0\n",atomic_load(&peak));
 }
