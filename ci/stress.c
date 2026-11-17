@@ -107,7 +107,7 @@ int main(void) {
     assert(atomic_load(&mapped)<=sparse+4096);
     for(size_t i=0;i<refill;++i)myfree(mixed[i]);
     for(size_t i=0;i<kept;++i)myfree(survivors[i]);
-    free(mixed);mymalloc_trim();assert(!atomic_load(&mapped));
+    mymalloc_trim();assert(!atomic_load(&mapped));
     /* Long-lived mixed churn: validate contents before every release. */
     unsigned state=0x1622026u;size_t live_requested=0,max_live=0;
     for(unsigned i=0;i<32768;++i)mixed[i]=NULL;
@@ -127,7 +127,7 @@ int main(void) {
     }
     size_t churn_mapped=atomic_load(&mapped);
     for(unsigned i=0;i<32768;++i)if(mixed[i])myfree(mixed[i]);
-    free(lengths);mymalloc_trim();assert(!atomic_load(&mapped));
+    free(lengths);free(mixed);mymalloc_trim();assert(!atomic_load(&mapped));
     printf("CHURN steps=200000 final_live_requested=%zu mapped_before_cleanup=%zu max_requested=%zu final=0\n",live_requested,churn_mapped,max_live);
     printf("FRAGMENTATION dense_requested=%zu dense_mapped=%zu sparse_requested=%zu sparse_mapped=%zu refill=%zu\n",requested,dense,kept*8,sparse,refill);
     printf("PASS sizes=8193 small=10000 cross_thread_allocations=81920 peak=%zu final=0\n",atomic_load(&peak));
