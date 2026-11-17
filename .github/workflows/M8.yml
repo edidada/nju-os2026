@@ -1,0 +1,24 @@
+name: M8 FAT32 BMP recovery
+on:
+  push:
+    branches: [edidada/M8]
+  workflow_dispatch:
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cache/fsrecov.img
+          key: nju-M8-official-image-v1
+      - name: Install filesystem tools
+        run: sudo apt-get update -qq && sudo apt-get install -y dosfstools mtools python3-pil
+      - name: Verify recovery on real formatted filesystems
+        run: bash ci/verify-m8.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m8-evidence
+          path: evidence/
