@@ -51,7 +51,18 @@ done
 gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer ci/matmul-check.c -pthread -lm -o gpt/matmul-sanitized
 timeout 60 gpt/matmul-sanitized > evidence/matmul-sanitized.txt
 gcc -std=gnu11 -O2 -g -Igpt -DGPT_SOURCE='"../evidence/serial.c"' ci/benchmark.c -pthread -lm -o gpt/benchmark-serial
-gcc -std=gnu2x -O2 -g -Itestkit gpt/gpt.c gpt/tests.c testkit/testkit.c -pthread -lm -o gpt/gpt
+gcc -std=gnu2x -O2 -g -Itestkit -Igpt evidence/serial.c gpt/tests.c testkit/testkit.c -pthread -lm -o gpt/public-original
+(cd gpt; TK_RUN=1 TK_VERBOSE=1 ./public-original 31373 612 338 635 281 4998 3715 351 2506 </dev/null) 2>&1 | tee evidence/public-original.txt
+python3 - <<'PY'
+from pathlib import Path
+s=Path('gpt/tests.c').read_text()
+needle='{ "31373",'
+assert s.count(needle)==1
+# TestKit forwards argv literally. Preserve every token and assertion, adding
+# only argv[0] in an evidence copy; the official file remains unchanged.
+Path('evidence/public-tests-compat.c').write_text(s.replace(needle,'{ "gpt", "31373",'))
+PY
+gcc -std=gnu2x -O2 -g -Itestkit gpt/gpt.c evidence/public-tests-compat.c testkit/testkit.c -pthread -lm -o gpt/gpt
 (cd gpt; TK_RUN=1 TK_VERBOSE=1 ./gpt 31373 612 338 635 281 4998 3715 351 2506 </dev/null) 2>&1 | tee evidence/public-tests.txt
 python3 - <<'PY'
 from pathlib import Path
@@ -66,9 +77,10 @@ for workers in [1,2,4]:
         (root/f'parallel-{workers}-{i}.txt').write_text(q.stdout)
 scores=re.findall(r'(\d+)/(\d+) test cases passed',(root/'public-tests.txt').read_text())
 assert scores and all(a==b=='1' for a,b in scores),scores
+assert re.findall(r'(\d+)/(\d+) test cases passed',(root/'public-original.txt').read_text())==[('0','1')]
 for name in ['serial','1','2','4']:
     q=subprocess.run([f'./benchmark-{name}'],cwd='gpt',capture_output=True,text=True,timeout=180,check=True)
     (root/f'benchmark-{name}.csv').write_text(q.stdout)
     (root/f'benchmark-{name}.stderr').write_text(q.stderr)
-(root/'parallel-checks.result').write_text('PASS: original 1/1; three prompts at 1/2/4 workers exactly match original; 196 scalar cases per build plus ASan/UBSan; three timed eight-token inference rounds per configuration\n')
+(root/'parallel-checks.result').write_text('PASS: published assertion with argv[0] compatibility 1/1 (unmodified starter/test pair 0/1); three prompts at 1/2/4 workers exactly match original; 196 scalar cases per build plus ASan/UBSan; three timed eight-token inference rounds per configuration\n')
 PY
