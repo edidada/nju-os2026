@@ -61,9 +61,9 @@ with tempfile.TemporaryDirectory(prefix='m8-') as temporary:
         results.append(evaluate(binary,cache,expected,'official-intact'))
         results.append(evaluate(binary,formatted,expected,'official-formatted'))
 
-    for case,(sector,spc) in enumerate([(512,1),(512,8),(1024,1)]):
+    for case,(megabytes,sector,spc) in enumerate([(64,512,1),(64,512,8),(64,1024,1),(128,512,8)]):
         image=work/f'fixture-{case}.img'
-        with image.open('wb') as f:f.truncate(64*1024*1024)
+        with image.open('wb') as f:f.truncate(megabytes*1024*1024)
         command(['mkfs.fat','-F','32','-S',sector,'-s',spc,image])
         command(['mmd','-i',image,'::/DCIM'])
         expected={}
@@ -79,6 +79,49 @@ with tempfile.TemporaryDirectory(prefix='m8-') as temporary:
             r=evaluate(binary,image,expected,f'fixture-{case}')
             results.append(r)
             assert r['exact_count']==len(expected),r
+    # Independently force a noncontiguous chain: exchange an interior cluster
+    # between two distinct smooth images and repair the actual FAT links.
+    # mtools must still extract the original exact bytes before formatting.
+    image=work/'fragmented.img'
+    with image.open('wb') as f:f.truncate(64*1024*1024)
+    command(['mkfs.fat','-F','32','-S','512','-s','8',image])
+    command(['mmd','-i',image,'::/DCIM'])
+    expected={};chains=[]
+    for i,name in enumerate(['Alpha_Long-name.bmp','Beta_Image-name.bmp']):
+        p=work/name;im=Image.new('RGB',(64,240))
+        im.putdata([((y//3, y//3, y//3) if i==0 else (255-y//4,255-y//4,255-y//4)) for y in range(240) for x in range(64)])
+        im.save(p);expected[name]=hashlib.sha1(p.read_bytes()).hexdigest()
+        command(['mcopy','-i',image,p,'::/DCIM/'+name])
+        listing=command(['mshowfat','-i',image,'::/DCIM/'+name])
+        chain=[]
+        for first,last in re.findall(r'<(\d+)(?:-(\d+))?>',listing):
+            chain.extend(range(int(first),int(last or first)+1))
+        assert len(chain)>=10,listing
+        chains.append(chain)
+    data=bytearray(image.read_bytes())
+    sector=struct.unpack_from('<H',data,11)[0];spc=data[13]
+    reserved=struct.unpack_from('<H',data,14)[0];fats=data[16]
+    fat_size=struct.unpack_from('<I',data,36)[0]*sector
+    cluster_size=sector*spc;data_start=reserved*sector+fats*fat_size
+    a,b=chains[0][6],chains[1][6]
+    def offset(c):return data_start+(c-2)*cluster_size
+    ca,cb=bytes(data[offset(a):offset(a)+cluster_size]),bytes(data[offset(b):offset(b)+cluster_size])
+    data[offset(a):offset(a)+cluster_size]=cb;data[offset(b):offset(b)+cluster_size]=ca
+    permutation={a:b,b:a}
+    permuted=[]
+    for chain in chains:
+        chain=[permutation.get(c,c) for c in chain];permuted.append(chain)
+        for copy in range(fats):
+            base=reserved*sector+copy*fat_size
+            for j,c in enumerate(chain):struct.pack_into('<I',data,base+c*4,chain[j+1] if j+1<len(chain) else 0x0fffffff)
+    image.write_bytes(data)
+    assert extract(image,work/'fragment-check')==expected,'invalid fragmented fixture'
+    (root/'fragmented-fixture.json').write_text(json.dumps({'chains':permuted,'expected':expected,'mtools_extracted_exact':True},indent=2)+'\n')
+    for binary in ['fsrecov','fsrecov-sanitized']:
+        r=evaluate(binary,image,expected,'fragmented-intact');results.append(r);assert r['exact_count']==2,r
+    command(['mkfs.fat','-F','32','-S','512','-s','8',image])
+    for binary in ['fsrecov','fsrecov-sanitized']:
+        r=evaluate(binary,image,expected,'fragmented-formatted');results.append(r);assert r['exact_count']==2,r
     # Truncation, invalid geometry, and random junk must not dereference
     # unvalidated BPB/cluster pointers, including under sanitizers.
     bad_cases=[b'',bytes(511),bytes(512),b'BM'+os.urandom(2046)]
@@ -96,5 +139,5 @@ with tempfile.TemporaryDirectory(prefix='m8-') as temporary:
     for r in results:
         if r['label']=='official-formatted':
             assert r['name_ratio']>.75 and r['exact_ratio']>.50,r
-(root/'checks.result').write_text('PASS: official formatted image >75% names and >50% exact image hashes; three generated FAT32 geometries fully recovered in normal/ASan/UBSan; source unchanged; malformed images rejected\n')
+(root/'checks.result').write_text('PASS: official formatted image >75% names and >50% exact image hashes; four generated FAT32 geometries through 128MiB and independently permuted fragmented files fully recovered in normal/ASan/UBSan; source unchanged; malformed images rejected\n')
 PY
