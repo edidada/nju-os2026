@@ -21,6 +21,12 @@ void *vmalloc(void *hint,size_t n) {
 void vmfree(void *p,size_t n) {assert(!munmap(p,n));atomic_fetch_sub(&mapped,n);}
 static void *remote[8][512];
 static pthread_barrier_t barrier;
+struct interval { uintptr_t start; size_t size; };
+static struct interval active[8*512];
+static int compare_range(const void *a,const void *b) {
+    uintptr_t x=((const struct interval *)a)->start,y=((const struct interval *)b)->start;
+    return (x>y)-(x<y);
+}
 static void *worker(void *argument) {
     size_t id=(size_t)argument;
     for(unsigned round=0;round<20;++round) {
@@ -28,6 +34,13 @@ static void *worker(void *argument) {
             size_t n=1+((i*131+round*53)%9000);
             unsigned char *p=mymalloc(n);assert(p && !((uintptr_t)p&7));
             memset(p,(int)(id+1),n);remote[id][i]=p;
+        }
+        pthread_barrier_wait(&barrier);
+        if(id==0) {
+            for(size_t t=0;t<8;++t)for(unsigned i=0;i<512;++i)
+                active[t*512+i]=(struct interval){(uintptr_t)remote[t][i],1+((i*131+round*53)%9000)};
+            qsort(active,8*512,sizeof active[0],compare_range);
+            for(unsigned i=1;i<8*512;++i)assert(active[i-1].start+active[i-1].size<=active[i].start);
         }
         pthread_barrier_wait(&barrier);
         size_t other=(id+1)%8;
