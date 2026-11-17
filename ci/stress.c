@@ -61,16 +61,18 @@ int main(void) {
     for(size_t n=1;n<=8193;++n) {
         unsigned char *p=mymalloc(n);assert(p && !((uintptr_t)p&7));
         memset(p,0xa5,n);for(size_t j=0;j<n;++j)assert(p[j]==0xa5);
-        myfree(p);assert(!atomic_load(&mapped));
+        myfree(p);assert(atomic_load(&mapped)<=4096);mymalloc_trim();assert(!atomic_load(&mapped));
     }
     void *small[10000];
     for(int i=0;i<10000;++i){small[i]=mymalloc(8);assert(small[i]);}
     assert(atomic_load(&mapped)<4*10000*8);
     for(int i=0;i<10000;++i)myfree(small[i]);
-    assert(!atomic_load(&mapped));
+    assert(atomic_load(&mapped)<=4096);
+    mymalloc_trim();assert(!atomic_load(&mapped));
     pthread_t threads[8];assert(!pthread_barrier_init(&barrier,NULL,8));
     for(size_t i=0;i<8;++i)assert(!pthread_create(&threads[i],NULL,worker,(void *)i));
     for(int i=0;i<8;++i)assert(!pthread_join(threads[i],NULL));
-    assert(!atomic_load(&mapped));pthread_barrier_destroy(&barrier);
+    assert(atomic_load(&mapped)<=32*4096);
+    mymalloc_trim();assert(!atomic_load(&mapped));pthread_barrier_destroy(&barrier);
     printf("PASS sizes=8193 small=10000 cross_thread_allocations=81920 peak=%zu final=0\n",atomic_load(&peak));
 }

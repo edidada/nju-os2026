@@ -42,7 +42,9 @@ int main(int argc,char **argv) {
     for(unsigned i=0;i<threads;++i)assert(!pthread_create(&ids[i],NULL,worker,&j));
     for(unsigned i=0;i<threads;++i)assert(!pthread_join(ids[i],NULL));
     double elapsed=now()-start;
-    printf("threads,size,batch,iterations,allocations,seconds,maps,unmaps,peak_bytes,final_bytes\n");
-    printf("%u,%zu,%u,%u,%zu,%.9f,%zu,%zu,%zu,%zu\n",threads,j.size,j.batch,j.iterations,(size_t)threads*j.batch*j.iterations,elapsed,atomic_load(&calls),atomic_load(&unmaps),atomic_load(&peak),atomic_load(&live));
+    size_t retained=atomic_load(&live);assert(retained<=32*4096);
+    mymalloc_trim();
+    printf("threads,size,batch,iterations,allocations,seconds,maps,unmaps,peak_bytes,final_bytes,retained_bytes\n");
+    printf("%u,%zu,%u,%u,%zu,%.9f,%zu,%zu,%zu,%zu,%zu\n",threads,j.size,j.batch,j.iterations,(size_t)threads*j.batch*j.iterations,elapsed,atomic_load(&calls),atomic_load(&unmaps),atomic_load(&peak),atomic_load(&live),retained);
     assert(!atomic_load(&live));
 }

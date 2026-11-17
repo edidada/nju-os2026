@@ -25,3 +25,6 @@ void myfree(void *ptr);
 
 void *vmalloc(void *addr, size_t length);
 void vmfree(void *addr, size_t length);
+
+/* Release bounded spare pages, without affecting live allocations. */
+void mymalloc_trim(void);

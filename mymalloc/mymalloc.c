@@ -13,6 +13,32 @@ struct page {
 #define HEADER ((sizeof(struct page) + 7u) & ~(size_t)7u)
 struct bucket { spinlock_t lock; struct page *available; };
 static struct bucket buckets[SHARDS][CLASSES];
+struct reserve { spinlock_t lock; void *page; };
+static struct reserve reserves[SHARDS];
+static void *take_page(unsigned owner) {
+    struct reserve *r = &reserves[owner];
+    spin_lock(&r->lock);
+    void *page = r->page; r->page = 0;
+    spin_unlock(&r->lock);
+    return page ? page : vmalloc(0, PAGE);
+}
+static void return_page(unsigned owner, void *page) {
+    struct reserve *r = &reserves[owner];
+    spin_lock(&r->lock);
+    if (!r->page) { r->page = page; page = 0; }
+    spin_unlock(&r->lock);
+    if (page) vmfree(page, PAGE);
+}
+/* Optional cache reclamation; active allocations are never touched. */
+void mymalloc_trim(void) {
+    for (unsigned i = 0; i < SHARDS; ++i) {
+        struct reserve *r = &reserves[i];
+        spin_lock(&r->lock);
+        void *page = r->page; r->page = 0;
+        spin_unlock(&r->lock);
+        if (page) vmfree(page, PAGE);
+    }
+}
 #ifdef M5_TEST_COUNT
 long malloc_count;
 #endif
@@ -60,7 +86,7 @@ void *mymalloc(size_t size) {
     if (!p) {
         /* Mapping and initialization do not hold a shared allocation lock. */
         spin_unlock(&b->lock);
-        p = vmalloc(0, PAGE);
+        p = take_page(owner);
         if (!p) return 0;
         p->length = PAGE; p->owner = owner; p->class_id = c; p->used = 0;
         p->capacity = (unsigned)((PAGE - HEADER) / slot);
@@ -90,6 +116,6 @@ void myfree(void *ptr) {
         detach(b, p);
         spin_unlock(&b->lock);
         /* No live allocation and no bucket reference remains. */
-        vmfree(p, PAGE);
+        return_page(p->owner, p);
     } else spin_unlock(&b->lock);
 }
