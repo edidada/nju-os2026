@@ -52,7 +52,7 @@ gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer ci/ma
 timeout 60 gpt/matmul-sanitized > evidence/matmul-sanitized.txt
 gcc -std=gnu11 -O2 -g -Igpt -DGPT_SOURCE='"../evidence/serial.c"' ci/benchmark.c -pthread -lm -o gpt/benchmark-serial
 gcc -std=gnu2x -O2 -g -Itestkit gpt/gpt.c gpt/tests.c testkit/testkit.c -pthread -lm -o gpt/gpt
-(cd gpt; TK_RUN=1 TK_VERBOSE=1 ./gpt </dev/null) 2>&1 | tee evidence/public-tests.txt
+(cd gpt; TK_RUN=1 TK_VERBOSE=1 ./gpt 31373 612 338 635 281 4998 3715 351 2506 </dev/null) 2>&1 | tee evidence/public-tests.txt
 python3 - <<'PY'
 from pathlib import Path
 import subprocess,json,re
