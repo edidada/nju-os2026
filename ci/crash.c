@@ -75,6 +75,15 @@ int __wrap_ftruncate(int fd, off_t size) {
     if (active && mode == 1 && !result) event('T', fd);
     return result;
 }
+/* kvdb.c uses _FILE_OFFSET_BITS=64; glibc redirects these symbols even on
+ * a 64-bit runner. Route both interfaces through the same fault model. */
+_Static_assert(sizeof(off_t) == sizeof(off64_t), "fault harness requires 64-bit off_t");
+ssize_t __wrap_pwrite64(int fd, const void *data, size_t n, off64_t offset) {
+    return __wrap_pwrite(fd, data, n, (off_t)offset);
+}
+int __wrap_ftruncate64(int fd, off64_t size) {
+    return __wrap_ftruncate(fd, (off_t)size);
+}
 int __wrap_fdatasync(int fd) {
     int active = target(fd);
     if (active && injected('D')) return -1;

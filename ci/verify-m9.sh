@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='kvdb-history-') as d:
 Path('evidence/histories.json').write_text(json.dumps(all_history,indent=2)+'\n')
 Path('evidence/checks.result').write_text('PASS: original 2/2; normal/ASan/UBSan shared/separate/inherited-handle concurrency and reopen; 20 histories of 12 operations checked against real-time-constrained serial KV semantics. Crash-model validation remains separate.\n')
 PY
-gcc -std=gnu11 -O2 -g -Wall -Wextra -Werror -Ilibkvdb ci/crash.c evidence/kvdb.o -pthread -Wl,--wrap=pwrite,--wrap=fdatasync,--wrap=ftruncate -o evidence/crash
+gcc -std=gnu11 -O2 -g -Wall -Wextra -Werror -Ilibkvdb ci/crash.c evidence/kvdb.o -pthread -Wl,--wrap=pwrite,--wrap=pwrite64,--wrap=fdatasync,--wrap=ftruncate,--wrap=ftruncate64 -o evidence/crash
 python3 - <<'PY'
 from pathlib import Path
 import subprocess,tempfile,shutil,json,hashlib,random,time,signal
