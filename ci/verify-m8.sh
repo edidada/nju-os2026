@@ -4,8 +4,8 @@ mkdir -p evidence .cache
 git rev-parse HEAD > evidence/commit.txt
 gcc --version > evidence/compiler.txt
 mkfs.fat --help > evidence/mkfs-version.txt 2>&1 || true
-gcc -std=gnu11 -O2 -g -Wall -Wextra -Werror fsrecov/fsrecov.c -o evidence/fsrecov
-gcc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer fsrecov/fsrecov.c -o evidence/fsrecov-sanitized
+gcc -std=gnu11 -O2 -g -Wall -Wextra -Werror -DFSRECOV_TRACE fsrecov/fsrecov.c -o evidence/fsrecov
+gcc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -DFSRECOV_TRACE fsrecov/fsrecov.c -o evidence/fsrecov-sanitized
 /usr/bin/python3 - <<'PY'
 from pathlib import Path
 import subprocess,os,json,re,hashlib,urllib.request,shutil,time,tempfile,struct
@@ -32,7 +32,7 @@ def extract(image,directory):
 def evaluate(binary,image,expected,label):
     before=hashlib.file_digest(image.open('rb'),'sha256').hexdigest()
     start=time.monotonic()
-    q=subprocess.run([str(root/binary),str(image)],capture_output=True,text=True,timeout=10)
+    q=subprocess.run([str(root/binary),str(image)],capture_output=True,text=True,timeout=60 if binary.endswith("sanitized") else 10)
     seconds=time.monotonic()-start
     (root/f'{label}-{binary}.stdout').write_text(q.stdout)
     (root/f'{label}-{binary}.stderr').write_text(q.stderr)

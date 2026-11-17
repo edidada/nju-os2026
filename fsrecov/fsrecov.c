@@ -207,9 +207,31 @@ static int checksum_file(int fd, char digest[41]) {
     return 0;
 }
 
-static int recover_image(const Disk *disk, const Image *image, const uint32_t *owners, uint32_t *chain, uint32_t *visited, uint32_t stamp) {
+// Estimate a cluster boundary from vertical neighbours in a 24-bit bitmap.
+// Each byte is compared with the same colour component one scanline earlier;
+// row padding is excluded. This uses only recovered pixels, never a hash oracle.
+static double boundary_cost(const unsigned char *prefix, size_t used,
+                            const unsigned char *candidate, size_t available,
+                            size_t row, size_t pixels, size_t pixel_start) {
+    size_t span = available < row ? available : row;
+    if (!span || used < pixel_start + row) return 0.0;
+    unsigned int sum = 0, count = 0;
+    for (size_t sample = 0; sample < 96; sample++) {
+        size_t j = sample * span / 96;
+        size_t position = used + j;
+        if ((position - pixel_start) % row >= pixels || position < pixel_start + row ||
+            position - row >= used) continue;
+        int delta = (int)candidate[j] - (int)prefix[position - row];
+        sum += (unsigned int)(delta < 0 ? -delta : delta);
+        count++;
+    }
+    return count ? (double)sum / count : 0.0;
+}
+
+static int recover_image(const Disk *disk, const Image *image, uint32_t *owners, uint32_t *chain, uint32_t *visited, uint32_t stamp) {
     size_t count = ((size_t)image->size + disk->cluster_size - 1) / disk->cluster_size;
     if (!count || count > disk->clusters) return 0;
+    memset(visited, 0, (size_t)disk->clusters * sizeof(*visited));
     uint32_t cluster = image->first;
     int fat_chain = 1;
     for (size_t i = 0; i < count; i++) {
@@ -222,18 +244,56 @@ static int recover_image(const Disk *disk, const Image *image, const uint32_t *o
         } else cluster = next;
     }
     if (!fat_chain) {
-        size_t found = 0;
+        unsigned char *preview = malloc(image->size);
+        if (!preview) return -1;
+        memset(visited, 0, (size_t)disk->clusters * sizeof(*visited));
+        const unsigned char *header = cluster_bytes(disk, image->first);
+        size_t pixels = (size_t)le32(header + 18) * 3;
+        size_t row = (pixels + 3) & ~(size_t)3, pixel_start = le32(header + 10);
         cluster = image->first;
-        // FAT allocation normally scans forward and can wrap at the end of
-        // the volume. Skip conservative prefixes of other known BMP files
-        // and directory clusters instead of copying them into this image.
-        for (uint32_t seen = 0; seen < disk->clusters && found < count; seen++) {
-            uint32_t owner = owners[cluster - 2];
-            if (!owner || owner == stamp) chain[found++] = cluster;
-            cluster = cluster == disk->clusters + 1 ? 2 : cluster + 1;
+        size_t used = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (i) {
+                uint32_t physical = cluster == disk->clusters + 1 ? 2 : cluster + 1;
+                uint32_t preferred = physical;
+                uint32_t scanned = 0;
+                while (scanned < disk->clusters && (visited[preferred - 2] ||
+                       (owners[preferred - 2] && owners[preferred - 2] != stamp))) {
+                    preferred = preferred == disk->clusters + 1 ? 2 : preferred + 1;
+                    scanned++;
+                }
+                if (scanned == disk->clusters) { free(preview); return 0; }
+                size_t available = image->size - used;
+                if (available > disk->cluster_size) available = disk->cluster_size;
+                double preferred_cost = boundary_cost(preview, used, cluster_bytes(disk, preferred),
+                                                      available, row, pixels, pixel_start);
+                uint32_t best = preferred;
+                double best_cost = preferred_cost;
+                if (preferred != physical || preferred_cost > 45.0) {
+                    for (uint32_t c = 2; c < disk->clusters + 2; c++) {
+                        if (visited[c - 2] || (owners[c - 2] && owners[c - 2] != stamp)) continue;
+                        double cost = boundary_cost(preview, used, cluster_bytes(disk, c),
+                                                    available, row, pixels, pixel_start);
+                        if (cost + 0.5 < best_cost) { best = c; best_cost = cost; }
+                    }
+                }
+                cluster = preferred != physical || best_cost < preferred_cost * 0.65 ? best : preferred;
+            }
+            chain[i] = cluster;
+            visited[cluster - 2] = 1;
+            size_t amount = image->size - used;
+            if (amount > disk->cluster_size) amount = disk->cluster_size;
+            memcpy(preview + used, cluster_bytes(disk, cluster), amount);
+            used += amount;
         }
-        if (found != count) return 0;
+        free(preview);
+        for (size_t i = 0; i < count; i++) if (!owners[chain[i] - 2]) owners[chain[i] - 2] = stamp;
     }
+#ifdef FSRECOV_TRACE
+    fprintf(stderr, "CHAIN %s", image->name);
+    for (size_t i = 0; i < count; i++) fprintf(stderr, " %u", chain[i]);
+    fputc('\n', stderr);
+#endif
     char name[] = "/tmp/fsrecov-XXXXXX";
     int output = mkostemp(name, O_CLOEXEC);
     if (output < 0) return -1;
@@ -264,6 +324,8 @@ int main(int argc, char **argv) {
     uint32_t *starts = calloc(disk.clusters, sizeof(*starts));
     unsigned char *directories = calloc(disk.clusters, 1);
     Image *images = NULL;
+    uint32_t *owned_counts = NULL;
+    unsigned char *processed = NULL;
     size_t length = 0, capacity = 0, fat_count = 0, contiguous_count = 0;
     int result = 0;
     if (!chain || !visited || !owners || !starts || !directories) { result = 1; goto done; }
@@ -306,19 +368,47 @@ int main(int argc, char **argv) {
             uint32_t at = c - 2;
             if (directories[at] || (starts[at] && starts[at] != owner) ||
                 (owners[at] && owners[at] != owner)) break;
+            if (j) {
+                const unsigned char *header = cluster_bytes(&disk, images[i].first);
+                size_t pixels = (size_t)le32(header + 18) * 3;
+                size_t row = (pixels + 3) & ~(size_t)3;
+                size_t used = j * disk.cluster_size;
+                size_t available = images[i].size - used;
+                if (available > disk.cluster_size) available = disk.cluster_size;
+                // Stop claiming a prefix when an apparent physical successor
+                // is visually discontinuous. It may belong to another file.
+                if (c < images[i].first || boundary_cost(header, used, cluster_bytes(&disk, c),
+                        available, row, pixels, le32(header + 10)) > 45.0) break;
+            }
             owners[at] = owner;
             c = c == disk.clusters + 1 ? 2 : c + 1;
         }
     }
-    for (size_t i = 0; i < length && !result; i++) {
-        int recovered = recover_image(&disk, &images[i], owners, chain, visited, (uint32_t)i + 1);
+    owned_counts = calloc(length ? length : 1, sizeof(*owned_counts));
+    processed = calloc(length ? length : 1, 1);
+    if (!owned_counts || !processed) { result = 1; goto done; }
+    for (uint32_t c = 0; c < disk.clusters; c++) {
+        if (owners[c] && owners[c] != UINT32_MAX) owned_counts[owners[c] - 1]++;
+    }
+    // Resolve the most confident (largest known-prefix fraction) files first.
+    // Their reconstructed clusters then protect later, more fragmented files.
+    for (size_t round = 0; round < length && !result; round++) {
+        size_t best = length;
+        for (size_t i = 0; i < length; i++) {
+            if (processed[i]) continue;
+            size_t need = ((size_t)images[i].size + disk.cluster_size - 1) / disk.cluster_size;
+            size_t best_need = best == length ? 1 : ((size_t)images[best].size + disk.cluster_size - 1) / disk.cluster_size;
+            if (best == length || (uint64_t)owned_counts[i] * best_need > (uint64_t)owned_counts[best] * need) best = i;
+        }
+        processed[best] = 1;
+        int recovered = recover_image(&disk, &images[best], owners, chain, visited, (uint32_t)best + 1);
         if (recovered < 0) { perror("Recover/checksum"); result = 1; break; }
         fat_count += recovered == 2;
         contiguous_count += recovered == 1;
     }
     fprintf(stderr, "Candidates=%zu FAT=%zu inferred=%zu\n", length, fat_count, contiguous_count);
 done:
-    free(chain); free(visited); free(owners); free(starts); free(directories); free(images);
+    free(chain); free(visited); free(owners); free(starts); free(directories); free(images); free(owned_counts); free(processed);
     munmap((void *)disk.bytes, disk.mapped);
     return result;
 }
