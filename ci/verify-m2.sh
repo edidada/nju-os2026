@@ -2,7 +2,9 @@
 set -euo pipefail
 mkdir -p evidence
 git rev-parse HEAD > evidence/commit.txt
-gcc -std=gnu2x -O2 -g -Wall -Wextra -Werror -Itestkit pstree/pstree.c pstree/tests.c testkit/testkit.c -o pstree/pstree
+gcc -std=gnu2x -O2 -g -Wall -Wextra -Werror -c pstree/pstree.c -o evidence/pstree.o
+# Keep upstream TestKit unchanged; its own warnings are not task-source errors.
+gcc -std=gnu2x -O2 -g -Wall -Itestkit evidence/pstree.o pstree/tests.c testkit/testkit.c -o pstree/pstree
 (cd pstree; TK_RUN=1 TK_VERBOSE=1 ./pstree -V) 2>&1 | tee evidence/public-tests.txt
 python3 - <<'PY'
 from pathlib import Path
