@@ -53,3 +53,7 @@ for repeat in 1 2 3; do
   done
  done
 done
+
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc -DFREESTANDING -ffreestanding -fno-builtin -fno-stack-protector -static -nostdlib -nostartfiles -no-pie mymalloc/mymalloc.c ci/freestanding.c -o evidence/freestanding-runtime
+timeout 30 ./evidence/freestanding-runtime
+printf 'PASS: freestanding 512KiB pool, four sizes exhausted twice, contents preserved, identical capacity recovered, bitmap empty\n' > evidence/freestanding-runtime.result
