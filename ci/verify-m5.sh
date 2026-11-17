@@ -30,3 +30,11 @@ for mode in normal sanitized; do
  gcc -std=c11 $flags -Wall -Wextra -Werror -Imymalloc mymalloc/mymalloc.c ci/stress.c -pthread -o "evidence/stress-$mode"
  "./evidence/stress-$mode" | tee "evidence/stress-$mode.output"
 done
+
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Imymalloc mymalloc/mymalloc.c ci/benchmark.c -pthread -o evidence/benchmark
+for config in '1 16 1 10000' '8 16 1 10000' '1 64 256 200' '8 64 256 200' '1 2048 1 10000' '8 8192 1 2000'; do
+ read -r threads bytes batch iterations <<< "$config"
+ for repeat in 1 2 3; do
+  ./evidence/benchmark "$threads" "$bytes" "$batch" "$iterations" > "evidence/benchmark-$threads-$bytes-$batch-$repeat.csv"
+ done
+done
