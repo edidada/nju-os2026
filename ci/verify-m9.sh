@@ -117,7 +117,10 @@ with tempfile.TemporaryDirectory(prefix='kvdb-crash-') as temporary:
             line=q.stdout.readline();assert line,line;ack.append(int(line))
         time.sleep(rng.uniform(0,.015))
         assert q.poll() is None,'writer unexpectedly finished before kill'
-        q.kill();rest,err=q.communicate(timeout=10)
+        q.kill();q.wait(timeout=10)
+        # Drain through the same TextIO wrapper used by readline: communicate
+        # may bypass ACK lines that readline has already buffered.
+        rest=q.stdout.read();err=q.stderr.read()
         assert q.returncode==-signal.SIGKILL and not err,(q.returncode,err)
         ack.extend(int(line) for line in rest.splitlines() if line.isdecimal())
         observed=int(run('counter',db));last=max(ack)
